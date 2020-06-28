@@ -354,7 +354,7 @@ namespace Realm {
 	if(a.lo[dim_order[i]] < b.lo[dim_order[i]]) return true;
 	if(a.lo[dim_order[i]] > b.lo[dim_order[i]]) return false;
       }
-      return true;
+      return false;
     }
   protected:
     const int *dim_order;
@@ -366,7 +366,6 @@ namespace Realm {
 						    int max_overhead,
 						    std::vector<Rect<N,T> >& covering)
   {
-    log_cover.error() << "begin compute_covering: bounds=" << bounds << " max_rects=" << max_rects << " max_overhead=" << max_overhead;
     assert(entries_valid);
 
     // start with a scan over all of our pieces see which ones are within
@@ -385,16 +384,13 @@ namespace Realm {
       covering.resize(in_bounds.size());
       for(size_t i = 0; i < in_bounds.size(); i++)
 	covering[i] = bounds.intersection(entries[in_bounds[i]].bounds);
-      log_cover.error() << "small enough: " << in_bounds.size();
       return true;
     }
 
     // we know some approximation is required - early out if that's not
     //  allowed
-    if(max_overhead == 0) {
-      log_cover.error() << "failed - no overhead allowed";
+    if(max_overhead == 0)
       return false;
-    }
 
     // next, handle the special case where only one rectangle is allowed,
     //  which means everything has to be glommed together
@@ -411,14 +407,11 @@ namespace Realm {
       // check overhead limit
       if(max_overhead >= 0) {
 	size_t extra = bbox.volume() - vol;
-	if(extra > (vol * max_overhead / 100)) {
-	  log_cover.error() << "failed: extra=" << extra << " > " << (vol * max_overhead / 100);
+	if(extra > (vol * max_overhead / 100))
 	  return false;  // doesn't fit
-	}
       }
       covering.resize(1);
       covering[0] = bbox;
-      log_cover.error() << "single box: " << bbox;
       return true;
     }
 
@@ -442,7 +435,6 @@ namespace Realm {
 			      max_rects,
 			      SparsityMapToRectAdapter<N,T>(entries),
 			      merged);
-      log_cover.error() << "1d done: ok=" << ok << " count=" << merged.size();
       if(ok) {
 	covering.swap(merged);
 	return true;
@@ -503,7 +495,6 @@ namespace Realm {
 				max_rects,
 				to_cover,
 				merged);
-	log_cover.error() << "pseudo-1d done: ok=" << ok << " count=" << merged.size();
 	if(ok) {
 	  covering.swap(merged);
 	  return true;
@@ -662,8 +653,6 @@ namespace Realm {
 	if(state[i].waste < state[best_count].waste)
 	  best_count = i;
       }
-      log_cover.error() << "nd done: waste=" << state[best_count].waste << " (max=" << max_waste << ") count=" << state[best_count].clumps.size();
-
       if(state[best_count].waste <= max_waste) {
 	covering = state[best_count].clumps;
 	return true;
