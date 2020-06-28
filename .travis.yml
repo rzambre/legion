@@ -2,10 +2,10 @@ language: cpp
 sudo: required
 dist: xenial
 os:
-  - linux
+  #- linux
   - osx
 compiler:
-  - gcc
+  #- gcc
   - clang
 env:
   global:
@@ -17,11 +17,11 @@ env:
   - SHORT=1
   matrix:
   - CC_FLAGS="-std=c++98" DEBUG=0 USE_CMAKE=1 TEST_REGENT=0 TEST_CTEST=1
-  - CC_FLAGS="-std=c++98" DEBUG=0 TEST_LEGION_CXX=0 TEST_REALM=0 REGENT_JOBS=4
-  - CC_FLAGS="-std=c++98" DEBUG=1 PRIVILEGE_CHECKS=1 BOUNDS_CHECKS=1 TEST_REGENT=0
-  - CC_FLAGS="-std=c++98" DEBUG=1 USE_SPY=1 TEST_LEGION_CXX=0 TEST_REALM=0 REGENT_INCREMENTAL=1
+  #- CC_FLAGS="-std=c++98" DEBUG=0 TEST_LEGION_CXX=0 TEST_REALM=0 REGENT_JOBS=4
+  #- CC_FLAGS="-std=c++98" DEBUG=1 PRIVILEGE_CHECKS=1 BOUNDS_CHECKS=1 TEST_REGENT=0
+  #- CC_FLAGS="-std=c++98" DEBUG=1 USE_SPY=1 TEST_LEGION_CXX=0 TEST_REALM=0 REGENT_INCREMENTAL=1
     #- CC_FLAGS="-std=c++98" USE_GASNET=1 USE_HDF=1 USE_CMAKE=1 TEST_REGENT=0
-  - CC_FLAGS="-std=c++98" DEBUG=1 USE_HDF=1 TEST_REGENT=0
+  #- CC_FLAGS="-std=c++98" DEBUG=1 USE_HDF=1 TEST_REGENT=0
   - CC_FLAGS="-std=c++11" DEBUG=0 TEST_REGENT=0
 matrix:
   exclude:
@@ -32,8 +32,7 @@ branches:
   only:
     - stable
     - master
-    - dma
-    - deppart
+    - travis_debug
 before_install:
   - export THREADS=2
   - |
