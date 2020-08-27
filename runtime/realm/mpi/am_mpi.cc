@@ -19,8 +19,10 @@
 static MPI_Win g_am_win = MPI_WIN_NULL;
 static void *g_am_base = NULL;
 static __thread int thread_id = 0;
+//static __thread int recv_thread_id = 0;
 static __thread int am_seq = 0;
 static Realm::atomic<unsigned int> num_threads(0);
+//static Realm::atomic<unsigned int> recv_num_threads(0);
 static unsigned char buf_recv_list[AM_BUF_COUNT][1024];
 static unsigned char *buf_recv = buf_recv_list[0];
 static MPI_Request req_recv_list[AM_BUF_COUNT];
@@ -60,6 +62,7 @@ void AM_Init(int *p_node_this, int *p_node_size)
     if (s) {
         n_am_mult_recv = atoi(s);
     }
+    //printf("Rank %d: n_am_mult_recv is %d\n", node_this, n_am_mult_recv);
     for (int  i = 0; i<n_am_mult_recv; i++) {
         CHECK_MPI( MPI_Irecv(buf_recv_list[i], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req_recv_list[i]) );
     }
@@ -100,6 +103,10 @@ void AMPoll()
     struct AM_msg *msg;
     int tn_src;
 
+    /*if (recv_thread_id == 0) {
+        recv_thread_id = recv_num_threads.fetch_add_acqrel(1) + 1;
+    }*/
+
     while (1) {
         int got_am;
         MPI_Status status;
@@ -123,6 +130,7 @@ void AMPoll()
             int msg_tag = *(int32_t *)(msg->stuff);
             payload = (char *) malloc(msg->payload_size);
             payload_type = 1;    // need_free;
+            //printf("Rank %d, recv_thread %d: Receiving msg type 1\n", node_this, recv_thread_id);
             CHECK_MPI( MPI_Recv(payload, msg->payload_size, MPI_BYTE, tn_src, msg_tag, comm_medium, &status) );
         } else if (msg->type == 2) {
             int offset = *(int32_t *)(msg->stuff);
@@ -143,6 +151,7 @@ void AMPoll()
         if (payload_type == 1) {
             free(payload);
         }
+        //printf("Rank %d, recv_thread %d: Posting replacement ANY_TAG receive\n", node_this, recv_thread_id);
         CHECK_MPI( MPI_Irecv(buf_recv_list[i_recv_list], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req_recv_list[i_recv_list]) );
         i_recv_list = (i_recv_list + 1) % n_am_mult_recv;
         buf_recv = buf_recv_list[i_recv_list];
@@ -167,8 +176,13 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
     msg->payload_size = payload_size;
     char *msg_header = msg->stuff;
 
+    if (thread_id == 0) {
+        thread_id = num_threads.fetch_add_acqrel(1) + 1;
+    }
+
     if (has_dest) {
         assert(g_am_win);
+        //printf("Rank %d, thread %d: AMSend with has_dest doing a Put \n", node_this, thread_id);
         CHECK_MPI( MPI_Put(payload, payload_size, MPI_BYTE, tgt, dest, payload_size, MPI_BYTE, g_am_win) );
         CHECK_MPI( MPI_Win_flush(tgt, g_am_win) );
 
@@ -177,6 +191,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         memcpy(msg_header + 4, header, header_size);
         int n = AM_MSG_HEADER_SIZE + 4 + header_size;
         assert(tgt != node_this);
+        //printf("Rank %d, thread %d: AMSend sending a message of type 2 after a Put-Win_flush\n", node_this, thread_id);
         CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, MPI_COMM_WORLD) );
     } else if (AM_MSG_HEADER_SIZE + header_size + payload_size < 1024) {
         msg->type = 0;
@@ -188,21 +203,24 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         }
         int n = AM_MSG_HEADER_SIZE + header_size + payload_size;
         assert(tgt != node_this);
+        //printf("Rank %d, thread %d: AMSend sending a message of type 0\n", node_this, thread_id);
         CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, 0x1, MPI_COMM_WORLD) );
     } else {
         msg->type = 1;
         int msg_tag = 0x0;
-        if (thread_id == 0) {
-            thread_id = num_threads.fetch_add_acqrel(1) + 1;
-        }
+        //if (thread_id == 0) {
+        //    thread_id = num_threads.fetch_add_acqrel(1) + 1;
+        //}
         am_seq = (am_seq + 1) & 0x1f;
         msg_tag = (thread_id << 10) + am_seq;
         *((int32_t *) msg_header) = (int32_t) msg_tag;
         memcpy(msg_header + 4, header, header_size);
         int n = AM_MSG_HEADER_SIZE + 4 + header_size;
         assert(tgt != node_this);
+        //printf("Rank %d, thread %d: AMSend sending a message of type 1; first send\n", node_this, thread_id);
         CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, MPI_COMM_WORLD) );
         assert(tgt != node_this);
+        //printf("Rank %d, thread %d: AMSend sending a message of type 1; second send on comm_medium\n", node_this, thread_id);
         CHECK_MPI( MPI_Send(payload, payload_size, MPI_BYTE, tgt, msg_tag, comm_medium) );
 
     }
