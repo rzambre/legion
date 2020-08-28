@@ -30,6 +30,7 @@ static int n_am_mult_recv = 5;
 static int pre_initialized;
 static int node_size;
 static int node_this;
+static MPI_Comm multi_vci_comm;
 static MPI_Comm comm_medium;
 int i_recv_list = 0;
 
@@ -42,6 +43,7 @@ namespace MPI {
 void AM_Init(int *p_node_this, int *p_node_size)
 {
     char *s;
+    MPI_Info info;
 
     MPI_Initialized(&pre_initialized);
     if (pre_initialized) {
@@ -57,6 +59,19 @@ void AM_Init(int *p_node_this, int *p_node_size)
     MPI_Comm_rank(MPI_COMM_WORLD, &node_this);
     *p_node_size = node_size;
     *p_node_this = node_this;
+    
+    /* Request for VCIs */
+    MPI_Info_create(&info);
+    MPI_Info_set(info, "mpi_assert_unordered", "true"); /* Can use tags for VCI selection */
+    
+    MPI_Info_set(info, "mpi_assert_tag_based_parallelism", "true"); // tag-based parallelism possible
+    MPI_Info_set(info, "mpi_num_tag_bits_for_vci", "5"); // number of bits in the MPI tag to use for VCI selection
+    MPI_Info_set(info, "mpi_num_tag_bits_for_app", "5"); // number of bits in the MPI tag for the app
+    
+    MPI_Info_set(info, "mpi_assert_new_vci", "true");
+    MPI_Info_set(info, "mpi_num_vcis", "10"); /* TODO: do we know the number of threads here? */
+    /* TODO: hints to negotiate bits for VCI hashing and user tag*/
+    MPI_Comm_dup_with_info(MPI_COMM_WORLD, info, &multi_vci_comm);
 
     s = getenv("AM_MULT_RECV");
     if (s) {
@@ -64,9 +79,11 @@ void AM_Init(int *p_node_this, int *p_node_size)
     }
     //printf("Rank %d: n_am_mult_recv is %d\n", node_this, n_am_mult_recv);
     for (int  i = 0; i<n_am_mult_recv; i++) {
-        CHECK_MPI( MPI_Irecv(buf_recv_list[i], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req_recv_list[i]) );
+        CHECK_MPI( MPI_Irecv(buf_recv_list[i], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, multi_vci_comm, &req_recv_list[i]) );
     }
-    MPI_Comm_dup(MPI_COMM_WORLD, &comm_medium);
+    MPI_Comm_dup(multi_vci_comm, &comm_medium); /* comm_medium inherits VCIs of multi_vci_comm */
+
+    MPI_Info_free(&info);
 }
 
 void AM_Finalize()
@@ -86,6 +103,7 @@ void AM_Finalize()
 
     AMPoll_cancel();
     CHECK_MPI( MPI_Comm_free(&comm_medium) );
+    CHECK_MPI( MPI_Comm_free(&multi_vci_comm) );
 
     if (!pre_initialized) {
         MPI_Finalize();
@@ -152,7 +170,7 @@ void AMPoll()
             free(payload);
         }
         //printf("Rank %d, recv_thread %d: Posting replacement ANY_TAG receive\n", node_this, recv_thread_id);
-        CHECK_MPI( MPI_Irecv(buf_recv_list[i_recv_list], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &req_recv_list[i_recv_list]) );
+        CHECK_MPI( MPI_Irecv(buf_recv_list[i_recv_list], 1024, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, multi_vci_comm, &req_recv_list[i_recv_list]) );
         i_recv_list = (i_recv_list + 1) % n_am_mult_recv;
         buf_recv = buf_recv_list[i_recv_list];
     }
@@ -192,7 +210,8 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         int n = AM_MSG_HEADER_SIZE + 4 + header_size;
         assert(tgt != node_this);
         //printf("Rank %d, thread %d: AMSend sending a message of type 2 after a Put-Win_flush\n", node_this, thread_id);
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, MPI_COMM_WORLD) );
+        int msg_tag = (thread_id << 10) + 1;
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, msg_tag, multi_vci_comm) );
     } else if (AM_MSG_HEADER_SIZE + header_size + payload_size < 1024) {
         msg->type = 0;
         if (header_size > 0) {
@@ -204,7 +223,8 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         int n = AM_MSG_HEADER_SIZE + header_size + payload_size;
         assert(tgt != node_this);
         //printf("Rank %d, thread %d: AMSend sending a message of type 0\n", node_this, thread_id);
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, 0x1, MPI_COMM_WORLD) );
+        int msg_tag = (thread_id << 10) + 1;
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, msg_tag, multi_vci_comm) );
     } else {
         msg->type = 1;
         int msg_tag = 0x0;
@@ -218,7 +238,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         int n = AM_MSG_HEADER_SIZE + 4 + header_size;
         assert(tgt != node_this);
         //printf("Rank %d, thread %d: AMSend sending a message of type 1; first send\n", node_this, thread_id);
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, MPI_COMM_WORLD) );
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, msg_tag, multi_vci_comm) );
         assert(tgt != node_this);
         //printf("Rank %d, thread %d: AMSend sending a message of type 1; second send on comm_medium\n", node_this, thread_id);
         CHECK_MPI( MPI_Send(payload, payload_size, MPI_BYTE, tgt, msg_tag, comm_medium) );
