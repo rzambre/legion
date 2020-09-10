@@ -18,7 +18,7 @@
 #define COMM_BASED_PAR 1 /* 0: tag-based parallelism */
 
 #if COMM_BASED_PAR
-#define NUM_COMMS 20
+#define NUM_COMMS 10
 #endif
 
 static MPI_Win g_am_win = MPI_WIN_NULL;
@@ -29,9 +29,9 @@ static __thread int am_seq = 0;
 static Realm::atomic<unsigned int> num_threads(0);
 //static Realm::atomic<unsigned int> recv_num_threads(0);
 #if COMM_BASED_PAR
-static unsigned char buf_recv_list[NUM_COMMS][AM_BUF_COUNT][1024];
+static unsigned char buf_recv_list[NUM_COMMS][1024];
 static unsigned char *buf_recv[NUM_COMMS];
-static MPI_Request req_recv_list[NUM_COMMS][AM_BUF_COUNT];
+static MPI_Request req_recv_list[NUM_COMMS];
 #else
 static unsigned char buf_recv_list[AM_BUF_COUNT][1024];
 static unsigned char *buf_recv = buf_recv_list[0];
@@ -43,7 +43,6 @@ static int node_size;
 static int node_this;
 #if COMM_BASED_PAR
 static MPI_Comm parapoint[NUM_COMMS];
-static int i_recv_list[NUM_COMMS] = {0};
 static int comm_start = 0;
 #else
 static MPI_Comm multi_vci_comm;
@@ -104,10 +103,8 @@ void AM_Init(int *p_node_this, int *p_node_size)
     //printf("Rank %d: n_am_mult_recv is %d\n", node_this, n_am_mult_recv);
 #if COMM_BASED_PAR
     for (int comm_i = 0; comm_i<NUM_COMMS; comm_i++) {
-        for (int  i = 0; i<n_am_mult_recv; i++) {
-            CHECK_MPI( MPI_Irecv(buf_recv_list[comm_i][i], 1024, MPI_CHAR, MPI_ANY_SOURCE, 0x1, parapoint[comm_i], &req_recv_list[comm_i][i]) );
-        }
-        buf_recv[comm_i] = buf_recv_list[comm_i][0];
+        CHECK_MPI( MPI_Irecv(buf_recv_list[comm_i], 1024, MPI_CHAR, MPI_ANY_SOURCE, 0x1, parapoint[comm_i], &req_recv_list[comm_i]) );
+        buf_recv[comm_i] = buf_recv_list[comm_i];
     }
 #else
     for (int  i = 0; i<n_am_mult_recv; i++) {
@@ -169,17 +166,15 @@ void AMPoll()
     while (1) {
         int got_am;
         int comm_i;
-        MPI_Comm this_parapoint;
         MPI_Status status;
         for (int i = 0; i<NUM_COMMS; i++) {
             got_am = 0;
             comm_i = (comm_start + i) % NUM_COMMS;
             //printf("Rank %d: Polling request %d on comm %d\n", node_this, i_recv_list[comm_i], comm_i);
-            CHECK_MPI( MPI_Test(&req_recv_list[comm_i][i_recv_list[comm_i]], &got_am, &status) ); 
+            CHECK_MPI( MPI_Test(&req_recv_list[comm_i], &got_am, &status) ); 
             if (got_am) {
                 msg = (struct AM_msg *) buf_recv[comm_i];
                 tn_src = status.MPI_SOURCE;
-                this_parapoint = parapoint[comm_i];
                 
                 /* Update comm_start for next poll */
                 comm_start = (comm_i + 1) % NUM_COMMS;
@@ -203,9 +198,8 @@ void AMPoll()
             int msg_tag = *(int32_t *)(msg->stuff);
             payload = (char *) malloc(msg->payload_size);
             payload_type = 1;    // need_free;
-            //printf("Rank %d, recv_thread %d: Receiving msg type 1\n", node_this, recv_thread_id);
             //printf("Rank %d: Receiving payload from %d on comm %d, tag %d\n", node_this, tn_src, comm_i, msg_tag);
-            CHECK_MPI( MPI_Recv(payload, msg->payload_size, MPI_BYTE, tn_src, msg_tag, this_parapoint, &status) );
+            CHECK_MPI( MPI_Recv(payload, msg->payload_size, MPI_BYTE, tn_src, msg_tag, parapoint[comm_i], &status) );
             //printf("Rank %d: DONE Receiving payload from %d on comm %d, tag %d\n", node_this, tn_src, comm_i, msg_tag);
         } else if (msg->type == 2) {
             int offset = *(int32_t *)(msg->stuff);
@@ -227,9 +221,7 @@ void AMPoll()
             free(payload);
         }
         //printf("Rank %d, recv_thread %d: Posting replacement ANY_TAG receive\n", node_this, recv_thread_id);
-        CHECK_MPI( MPI_Irecv(buf_recv_list[comm_i][i_recv_list[comm_i]], 1024, MPI_CHAR, MPI_ANY_SOURCE, 0x1, parapoint[comm_i], &req_recv_list[comm_i][i_recv_list[comm_i]]) );
-        i_recv_list[comm_i] = (i_recv_list[comm_i] + 1) % n_am_mult_recv;
-        buf_recv[comm_i] = buf_recv_list[comm_i][i_recv_list[comm_i]];
+        CHECK_MPI( MPI_Irecv(buf_recv_list[comm_i], 1024, MPI_CHAR, MPI_ANY_SOURCE, 0x1, parapoint[comm_i], &req_recv_list[comm_i]) );
     }
 #else
     while (1) {
@@ -289,9 +281,7 @@ void AMPoll_cancel()
 {
 #if COMM_BASED_PAR
     for (int comm_i = 0; comm_i<NUM_COMMS; comm_i++) {
-        for (int  i = 0; i<n_am_mult_recv; i++) {
-            CHECK_MPI( MPI_Cancel(&req_recv_list[comm_i][i]) );
-        }
+        CHECK_MPI( MPI_Cancel(&req_recv_list[comm_i]) );
     }
 #else
     for (int  i = 0; i<n_am_mult_recv; i++) {
@@ -309,10 +299,14 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
     msg->header_size = header_size;
     msg->payload_size = payload_size;
     char *msg_header = msg->stuff;
+    
+    MPI_Comm my_parapoint; 
 
     if (thread_id == 0) {
         thread_id = num_threads.fetch_add_acqrel(1) + 1;
     }
+
+    my_parapoint = parapoint[(thread_id-1) % NUM_COMMS];
 
     if (has_dest) {
         assert(g_am_win);
@@ -329,7 +323,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
 
         //printf("Rank %d: Sending to %d with dest using thread %d on comm %d\n", node_this, tgt, thread_id, (thread_id-1)%NUM_COMMS);
 #if COMM_BASED_PAR
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, parapoint[(thread_id-1)%NUM_COMMS]) );
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, my_parapoint) );
 #else
         int msg_tag = (thread_id << 10) + 1; /* TODO: use variable for number of bits to shift */
         CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, msg_tag, multi_vci_comm) );
@@ -348,7 +342,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         //printf("Rank %d, thread %d: AMSend sending a message of type 0\n", node_this, thread_id);
         //printf("Rank %d: Sending to %d msg type 0 using thread %d on comm %d\n", node_this, tgt, thread_id, (thread_id-1)%NUM_COMMS);
 #if COMM_BASED_PAR
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, 0x1, parapoint[(thread_id-1)%NUM_COMMS]) );
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, 0x1, my_parapoint) );
 #else
         int msg_tag = (thread_id << 10) + 1; /* TODO: use variable for number of bits to shift */
         CHECK_MPI( MPI_Send(buf_send, n, MPI_CHAR, tgt, msg_tag, multi_vci_comm) );
@@ -370,7 +364,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         //printf("Rank %d, thread %d: AMSend sending a message of type 1; first send\n", node_this, thread_id);
         //printf("Rank %d: Sending to %d msg type 1 header using thread %d on comm %d\n", node_this, tgt, thread_id, (thread_id-1)%NUM_COMMS);
 #if COMM_BASED_PAR
-        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, parapoint[(thread_id-1)%NUM_COMMS]) );
+        CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, 0x1, my_parapoint) );
 #else
         CHECK_MPI( MPI_Send(buf_send, n, MPI_BYTE, tgt, msg_tag, multi_vci_comm) );
 #endif
@@ -379,7 +373,7 @@ void AMSend(int tgt, int msgid, int header_size, int payload_size, const char *h
         //printf("Rank %d, thread %d: AMSend sending a message of type 1; second send on comm_medium\n", node_this, thread_id);
         //printf("Rank %d: Sending to %d msg type 1 payload using thread %d on comm %d, tag %d\n", node_this, tgt, thread_id, (thread_id-1)%NUM_COMMS, msg_tag);
 #if COMM_BASED_PAR
-        CHECK_MPI( MPI_Send(payload, payload_size, MPI_BYTE, tgt, msg_tag, parapoint[(thread_id-1)%NUM_COMMS]) );
+        CHECK_MPI( MPI_Send(payload, payload_size, MPI_BYTE, tgt, msg_tag, my_parapoint) );
 #else
         CHECK_MPI( MPI_Send(payload, payload_size, MPI_BYTE, tgt, msg_tag, comm_medium) );
 #endif
